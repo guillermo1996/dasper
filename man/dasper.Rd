@@ -2,8 +2,27 @@
 % Please edit documentation in R/dasper-package.R
 \docType{package}
 \name{dasper}
+\alias{dasper-package}
 \alias{dasper}
 \title{dasper: detecting abberant splicing events from RNA-seq data}
 \description{
 Placeholder for package description - to be updated
+}
+\seealso{
+Useful links:
+\itemize{
+  \item \url{https://github.com/dzhang32/dasper}
+  \item Report bugs at \url{https://support.bioconductor.org/t/dasper}
+}
+
+}
+\author{
+\strong{Maintainer}: David Zhang \email{david.zhang.12@ucl.ac.uk} (\href{https://orcid.org/0000-0003-2382-8460}{ORCID})
+
+Other contributors:
+\itemize{
+  \item Leonardo Collado-Torres \email{lcolladotor@gmail.com} (\href{https://orcid.org/0000-0003-2140-308X}{ORCID}) [contributor]
+  \item Guillermo Rocamora-Perez \email{guillermorocamora@gmail.com} (\href{https://orcid.org/0000-0002-4795-3648}{ORCID}) [contributor]
+}
+
 }

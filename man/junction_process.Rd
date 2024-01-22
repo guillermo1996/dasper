@@ -141,15 +141,15 @@ is stored in the \link[SummarizedExperiment:SummarizedExperiment-class]{assay}
 }
 \section{Functions}{
 \itemize{
-\item \code{junction_annot}: Annotate junctions using reference annotation
+\item \code{junction_annot()}: Annotate junctions using reference annotation
 
-\item \code{junction_filter}: Filter junctions by count, width, annotation or region
+\item \code{junction_filter()}: Filter junctions by count, width, annotation or region
 
-\item \code{junction_norm}: Normalise junction counts by cluster
+\item \code{junction_norm()}: Normalise junction counts by cluster
 
-\item \code{junction_score}: Score patient junctions by their abnormality
+\item \code{junction_score()}: Score patient junctions by their abnormality
+
 }}
-
 \examples{
 
 ##### Set up txdb #####

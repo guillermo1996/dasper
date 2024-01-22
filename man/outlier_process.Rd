@@ -79,12 +79,12 @@ each cluster with it's associated gene and transcript.
 }
 \section{Functions}{
 \itemize{
-\item \code{outlier_aggregate}: Aggregate outlier scores from per junction to
+\item \code{outlier_aggregate()}: Aggregate outlier scores from per junction to
 cluster-level
 
-\item \code{outlier_detect}: Detecting outlier junctions
-}}
+\item \code{outlier_detect()}: Detecting outlier junctions
 
+}}
 \examples{
 \donttest{
 

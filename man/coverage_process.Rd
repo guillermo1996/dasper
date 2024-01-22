@@ -123,11 +123,11 @@ greatest disruption.
 }
 \section{Functions}{
 \itemize{
-\item \code{coverage_norm}: Load and normalise coverage from RNA-sequencing data
+\item \code{coverage_norm()}: Load and normalise coverage from RNA-sequencing data
 
-\item \code{coverage_score}: Score coverage by their abnormality
+\item \code{coverage_score()}: Score coverage by their abnormality
+
 }}
-
 \examples{
 
 ##### Set up txdb #####

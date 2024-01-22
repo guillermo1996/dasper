@@ -6,8 +6,7 @@
 \usage{
 junction_load(
   junction_paths,
-  metadata = dplyr::tibble(samp_id = stringr::str_c("samp_",
-    seq_along(junction_paths))),
+  metadata = dplyr::tibble(samp_id = stringr::str_c("samp_", seq_along(junction_paths))),
   controls = rep(FALSE, length(junction_paths)),
   load_func = .STAR_load,
   chrs = NULL,

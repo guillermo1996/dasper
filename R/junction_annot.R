@@ -2,62 +2,96 @@
 #'
 #' @export
 junction_annot <- function(junctions,
-    ref,
-    ref_cols = c("gene_id", "tx_name", "exon_id"),
-    ref_cols_to_merge = c("gene_id")) {
+                           ref,
+                           ref_cols = c("gene_id", "tx_name", "exon_id"),
+                           ref_cols_to_merge = c("gene_id")) {
+  ##### Check user input is correct #####
 
-    ##### Check user input is correct #####
+  if (!(methods::isClass(junctions, "RangedSummarisedExperiment"))) {
+    stop("junctions must be in a RangedSummarisedExperiment format")
+  }
 
-    if (!(methods::isClass(junctions, "RangedSummarisedExperiment"))) {
-        stop("junctions must be in a RangedSummarisedExperiment format")
-    }
+  if (!all(ref_cols_to_merge %in% ref_cols)) {
+    stop(
+      "All ref_cols_to_merge must be part of ref_cols. ",
+      "The following were not found: ",
+      stringr::str_c(ref_cols_to_merge[!(ref_cols_to_merge %in% ref_cols)],
+        collapse = ", "
+      )
+    )
+  }
 
-    if (!all(ref_cols_to_merge %in% ref_cols)) {
-        stop(
-            "All ref_cols_to_merge must be part of ref_cols. ",
-            "The following were not found: ",
-            stringr::str_c(ref_cols_to_merge[!(ref_cols_to_merge %in% ref_cols)],
-                collapse = ", "
-            )
-        )
-    }
+  if (!("gene_id" %in% ref_cols && "gene_id" %in% ref_cols_to_merge)) {
+    stop("'gene_id' must be in both ref_cols and ref_cols_to_merge")
+  }
 
-    if (!("gene_id" %in% ref_cols && "gene_id" %in% ref_cols_to_merge)) {
-        stop("'gene_id' must be in both ref_cols and ref_cols_to_merge")
-    }
+  ##### Extract annotated exons/junctions co-ordinates from reference #####
 
-    ##### Extract annotated exons/junctions co-ordinates from reference #####
+  print(stringr::str_c(Sys.time(), " - Obtaining co-ordinates of annotated exons and junctions..."))
 
-    print(stringr::str_c(Sys.time(), " - Obtaining co-ordinates of annotated exons and junctions..."))
+  ref <- ref_load(ref)
+  ref_exons <- ref %>% GenomicFeatures::exons(columns = ref_cols)
 
-    ref <- ref_load(ref)
-    ref_exons <- ref %>% GenomicFeatures::exons(columns = ref_cols)
+  ref_introns <- ref %>%
+    GenomicFeatures::intronsByTranscript() %>%
+    unlist()
 
-    ref_introns <- ref %>%
-        GenomicFeatures::intronsByTranscript() %>%
-        unlist()
+  ##### G: Detect number of cores
+  if (!exists("num_cores")) num_cores <<- 1
 
+  ##### G: Based on the number of cores, run default junction annotation
+  ##### pipeline or my modified version
+  if (num_cores == 1) {
     ##### Obtain annotation through overlapping introns/exons #####
-
     print(stringr::str_c(Sys.time(), " - Getting junction annotation using overlapping exons..."))
-
     junctions <- .junction_annot_ref(junctions, ref_introns, ref_exons)
 
     ##### Tidy annotation - collapse gene annotation to per junction and infer strand #####
-
     print(stringr::str_c(Sys.time(), " - Tidying junction annotation..."))
-
     junctions <- .junction_annot_tidy(junctions, ref_cols_to_merge)
 
     ##### Derive junction categories using strand & overlapping exon annotation #####
-
     print(stringr::str_c(Sys.time(), " - Deriving junction categories..."))
-
     junctions <- .junction_cat(junctions)
 
     print(stringr::str_c(Sys.time(), " - done!"))
+  } else {
+    ##### Split the junctions into a list
+    mcols(junctions)[["junction_order"]] <- seq_along(junctions)
+    mcols(junctions)[["group_idx"]] <- mcols(junctions)[["junction_order"]] %% num_cores
 
-    return(junctions)
+    split_junctions <- split(junctions, mcols(junctions)[["group_idx"]])
+
+    ##### Parallel annotation of the results
+    annot_split_junctions <- BiocParallel::bplapply(
+      split_junctions,
+      BPPARAM = BiocParallel::SnowParam(workers = num_cores, type = "FORK"),
+      function(split_junctions_i) {
+        split_junctions_i <- .junction_annot_ref(split_junctions_i, ref_introns, ref_exons)
+        split_junctions_i <- .junction_annot_tidy(split_junctions_i, ref_cols_to_merge)
+        split_junctions_i <- .junction_cat(split_junctions_i)
+
+        return(split_junctions_i)
+      }
+    )
+
+    junctions <- unlist(GenomicRanges::GRangesList(annot_split_junctions))
+
+    ##### Fix junction names
+    for (col in names(mcols(junctions))) {
+      if (class(mcols(junctions)[[col]]) %in% c("CompressedCharacterList", "CompressedIntegerList")) {
+        names(mcols(junctions)[[col]]) <- mcols(junctions)[["junction_order"]]
+      }
+    }
+
+    ##### Rearrange and rename the junction rows
+    junctions <- sort(junctions, by = ~junction_order)
+    mcols(junctions)[["group_idx"]] <- NULL
+    mcols(junctions)[["junction_order"]] <- NULL
+    junctions <- unname(junctions)
+  }
+
+  return(junctions)
 }
 
 #' Finds overlap between junctions ends and reference annotation
@@ -81,82 +115,79 @@ junction_annot <- function(junctions,
 #' @keywords internal
 #' @noRd
 .junction_annot_ref <- function(junctions, ref_introns, ref_exons, ignore.strand = FALSE) {
+  ##### Do junctions match introns from the reference annotation? #####
 
-    ##### Do junctions match introns from the reference annotation? #####
+  junctions_intron_hits <- junctions %>%
+    findOverlaps(ref_introns,
+      type = "equal",
+      ignore.strand = ignore.strand
+    )
 
-    junctions_intron_hits <- junctions %>%
-        findOverlaps(ref_introns,
-            type = "equal",
-            ignore.strand = ignore.strand
+  mcols(junctions)[["in_ref"]] <- seq_along(junctions) %in% unique(queryHits(junctions_intron_hits))
+
+  ##### Do junctions start/end overlap with an exon end/start? #####
+
+  # match junctions to exon definitions
+  start(junctions) <- start(junctions) - 1
+  end(junctions) <- end(junctions) + 1
+
+  # make a gr where each junction/exon is marked by only a start or end co-ordinate
+  junctions_start_end <- .get_start_end(junctions)
+  ref_exons_start_end <- .get_start_end(ref_exons)
+
+  ref_col_names <- c(ref_exons %>% mcols() %>% colnames(), "strand", "exon_width")
+
+  for (start_end in c("start", "end")) {
+    # only get hits between junc start/exon end or junc end/exon start
+    # the other way (e.g. junc end/exon end) should not happen (only 0.05% of the data)
+    end_start <- ifelse(start_end == "start", "end", "start")
+
+    junctions_exon_hits <- findOverlaps(
+      query = junctions_start_end[[start_end]],
+      subject = ref_exons_start_end[[end_start]],
+      type = "equal",
+      ignore.strand = ignore.strand
+    )
+
+    for (i in seq_along(ref_col_names)) {
+      # extract the values to be used for annotation of junctions
+      if (ref_col_names[i] == "strand") {
+        ref_col_raw <- ref_exons %>%
+          strand() %>%
+          as.character()
+      } else if (ref_col_names[i] == "exon_width") {
+        ref_col_raw <- ref_exons %>%
+          width() %>%
+          as.integer()
+      } else {
+        ref_col_raw <- mcols(ref_exons)[[ref_col_names[i]]]
+      }
+
+      ref_col_tidy <-
+        .regroup(
+          x = ref_col_raw[subjectHits(junctions_exon_hits)], # subset annotation by the
+          groups = queryHits(junctions_exon_hits), # group hits by the junction they overlap
+          all_groups = seq_along(junctions) # each junction is a group
         )
 
-    mcols(junctions)[["in_ref"]] <- seq_along(junctions) %in% unique(queryHits(junctions_intron_hits))
+      if (is.character(ref_col_tidy[[1]])) {
+        ref_col_tidy <- ref_col_tidy %>%
+          CharacterList() %>%
+          unique() # unique values for when junction start/end overlaps e.g. two exons
+      } else {
+        ref_col_tidy <- ref_col_tidy %>%
+          IRanges::IntegerList()
+      }
 
-    ##### Do junctions start/end overlap with an exon end/start? #####
-
-    # match junctions to exon definitions
-    start(junctions) <- start(junctions) - 1
-    end(junctions) <- end(junctions) + 1
-
-    # make a gr where each junction/exon is marked by only a start or end co-ordinate
-    junctions_start_end <- .get_start_end(junctions)
-    ref_exons_start_end <- .get_start_end(ref_exons)
-
-    ref_col_names <- c(ref_exons %>% mcols() %>% colnames(), "strand", "exon_width")
-
-    for (start_end in c("start", "end")) {
-
-        # only get hits between junc start/exon end or junc end/exon start
-        # the other way (e.g. junc end/exon end) should not happen (only 0.05% of the data)
-        end_start <- ifelse(start_end == "start", "end", "start")
-
-        junctions_exon_hits <- findOverlaps(
-            query = junctions_start_end[[start_end]],
-            subject = ref_exons_start_end[[end_start]],
-            type = "equal",
-            ignore.strand = ignore.strand
-        )
-
-        for (i in seq_along(ref_col_names)) {
-
-            # extract the values to be used for annotation of junctions
-            if (ref_col_names[i] == "strand") {
-                ref_col_raw <- ref_exons %>%
-                    strand() %>%
-                    as.character()
-            } else if (ref_col_names[i] == "exon_width") {
-                ref_col_raw <- ref_exons %>%
-                    width() %>%
-                    as.integer()
-            } else {
-                ref_col_raw <- mcols(ref_exons)[[ref_col_names[i]]]
-            }
-
-            ref_col_tidy <-
-                .regroup(
-                    x = ref_col_raw[subjectHits(junctions_exon_hits)], # subset annotation by the
-                    groups = queryHits(junctions_exon_hits), # group hits by the junction they overlap
-                    all_groups = seq_along(junctions) # each junction is a group
-                )
-
-            if (is.character(ref_col_tidy[[1]])) {
-                ref_col_tidy <- ref_col_tidy %>%
-                    CharacterList() %>%
-                    unique() # unique values for when junction start/end overlaps e.g. two exons
-            } else {
-                ref_col_tidy <- ref_col_tidy %>%
-                    IRanges::IntegerList()
-            }
-
-            mcols(junctions)[[stringr::str_c(ref_col_names[i], "_", start_end)]] <- ref_col_tidy
-        }
+      mcols(junctions)[[stringr::str_c(ref_col_names[i], "_", start_end)]] <- ref_col_tidy
     }
+  }
 
-    # convert junc co-ords back to intron definitions
-    start(junctions) <- start(junctions) + 1
-    end(junctions) <- end(junctions) - 1
+  # convert junc co-ords back to intron definitions
+  start(junctions) <- start(junctions) + 1
+  end(junctions) <- end(junctions) - 1
 
-    return(junctions)
+  return(junctions)
 }
 
 #' Tidying junction annotation
@@ -172,56 +203,55 @@ junction_annot <- function(junctions,
 #' @keywords internal
 #' @noRd
 .junction_annot_tidy <- function(junctions, ref_cols_to_merge) {
+  ##### Collapse gene_id/strand annotation from start/end #####
 
-    ##### Collapse gene_id/strand annotation from start/end #####
+  if (is.null(ref_cols_to_merge)) {
+    ref_cols_to_merge <- c()
+  }
 
-    if (is.null(ref_cols_to_merge)) {
-        ref_cols_to_merge <- c()
-    }
+  if (!("strand" %in% ref_cols_to_merge)) {
+    ref_cols_to_merge <- c(ref_cols_to_merge, "strand")
+  }
 
-    if (!("strand" %in% ref_cols_to_merge)) {
-        ref_cols_to_merge <- c(ref_cols_to_merge, "strand")
-    }
+  # collapse gene/strand columns to per junction
+  # instead of per start/end for easier querying
+  for (col in ref_cols_to_merge) {
+    mcols(junctions)[[stringr::str_c(col, "_junction")]] <-
+      .merge_CharacterList(
+        x = mcols(junctions)[[stringr::str_c(col, "_start")]],
+        y = mcols(junctions)[[stringr::str_c(col, "_end")]]
+      ) %>%
+      unique()
+  }
 
-    # collapse gene/strand columns to per junction
-    # instead of per start/end for easier querying
-    for (col in ref_cols_to_merge) {
-        mcols(junctions)[[stringr::str_c(col, "_junction")]] <-
-            .merge_CharacterList(
-                x = mcols(junctions)[[stringr::str_c(col, "_start")]],
-                y = mcols(junctions)[[stringr::str_c(col, "_end")]]
-            ) %>%
-            unique()
-    }
+  ##### Tidy strand #####
 
-    ##### Tidy strand #####
+  # replacing empty strands ("none") and those with >1 strand ("ambig_gene") with "*"
+  # this ensures each vector in CharacterList is of length 1
+  # so can be unlisted and length(chr_list) == length(unlist(chr_list))
+  mcols(junctions)[["strand_junction"]][lengths(mcols(junctions)[["strand_junction"]]) == 0] <- "*"
+  mcols(junctions)[["strand_junction"]][lengths(mcols(junctions)[["strand_junction"]]) > 1] <- "*"
 
-    # replacing empty strands ("none") and those with >1 strand ("ambig_gene") with "*"
-    # this ensures each vector in CharacterList is of length 1
-    # so can be unlisted and length(chr_list) == length(unlist(chr_list))
-    mcols(junctions)[["strand_junction"]][lengths(mcols(junctions)[["strand_junction"]]) == 0] <- "*"
-    mcols(junctions)[["strand_junction"]][lengths(mcols(junctions)[["strand_junction"]]) > 1] <- "*"
+  # compare the strand obtained from annotation strand to original strand
+  # salvage situations when either original or annotation strand is "*" and the other is "+" or "-"
+  strand_orig <- as.character(strand(junctions))
+  strand_annot <- unlist(mcols(junctions)[["strand_junction"]])
 
-    # compare the strand obtained from annotation strand to original strand
-    # salvage situations when either original or annotation strand is "*" and the other is "+" or "-"
-    strand_orig <- as.character(strand(junctions))
-    strand_annot <- unlist(mcols(junctions)[["strand_junction"]])
+  strand(junctions) <- dplyr::case_when(
+    strand_orig == strand_annot ~ strand_orig,
+    strand_orig == "*" & strand_annot != "*" ~ strand_annot,
+    strand_annot == "*" & strand_orig != "*" ~ strand_orig,
+    TRUE ~ NA_character_
+  )
 
-    strand(junctions) <- dplyr::case_when(
-        strand_orig == strand_annot ~ strand_orig,
-        strand_orig == "*" & strand_annot != "*" ~ strand_annot,
-        strand_annot == "*" & strand_orig != "*" ~ strand_orig,
-        TRUE ~ NA_character_
-    )
+  if (any(is.na(strand(junctions)))) {
+    stop("There should be no strands left as NA after tidying...")
+  }
 
-    if (any(is.na(strand(junctions)))) {
-        stop("There should be no strands left as NA after tidying...")
-    }
+  # remove to avoid confusion between strand() and strand_junc
+  mcols(junctions)[["strand_junc"]] <- NULL
 
-    # remove to avoid confusion between strand() and strand_junc
-    mcols(junctions)[["strand_junc"]] <- NULL
-
-    return(junctions)
+  return(junctions)
 }
 
 #' Categorises junctions depending on reference annotation and strand
@@ -237,49 +267,48 @@ junction_annot <- function(junctions,
 #' @keywords internal
 #' @noRd
 .junction_cat <- function(junctions, ref_junc) {
+  # store strand seperately for readability
+  strand_junc <- as.character(strand(junctions))
 
-    # store strand seperately for readability
-    strand_junc <- as.character(strand(junctions))
+  mcols(junctions)[["type"]] <-
+    dplyr::case_when(
+      mcols(junctions)[["in_ref"]] == TRUE ~ "annotated",
+      lengths(mcols(junctions)[["gene_id_junction"]]) == 0 ~ "unannotated",
+      lengths(mcols(junctions)[["gene_id_junction"]]) > 1 ~ "ambig_gene", # after these checks lengths(gene_id_junction) must equal 1
+      lengths(mcols(junctions)[["gene_id_start"]]) > 0 & lengths(mcols(junctions)[["gene_id_end"]]) > 0 ~ "novel_combo",
+      strand_junc == "+" & lengths(mcols(junctions)[["gene_id_start"]]) > 0 ~ "novel_acceptor",
+      strand_junc == "-" & lengths(mcols(junctions)[["gene_id_start"]]) > 0 ~ "novel_donor",
+      strand_junc == "+" & lengths(mcols(junctions)[["gene_id_end"]]) > 0 ~ "novel_donor",
+      strand_junc == "-" & lengths(mcols(junctions)[["gene_id_end"]]) > 0 ~ "novel_acceptor",
+      TRUE ~ NA_character_
+    )
 
-    mcols(junctions)[["type"]] <-
-        dplyr::case_when(
-            mcols(junctions)[["in_ref"]] == TRUE ~ "annotated",
-            lengths(mcols(junctions)[["gene_id_junction"]]) == 0 ~ "unannotated",
-            lengths(mcols(junctions)[["gene_id_junction"]]) > 1 ~ "ambig_gene", # after these checks lengths(gene_id_junction) must equal 1
-            lengths(mcols(junctions)[["gene_id_start"]]) > 0 & lengths(mcols(junctions)[["gene_id_end"]]) > 0 ~ "novel_combo",
-            strand_junc == "+" & lengths(mcols(junctions)[["gene_id_start"]]) > 0 ~ "novel_acceptor",
-            strand_junc == "-" & lengths(mcols(junctions)[["gene_id_start"]]) > 0 ~ "novel_donor",
-            strand_junc == "+" & lengths(mcols(junctions)[["gene_id_end"]]) > 0 ~ "novel_donor",
-            strand_junc == "-" & lengths(mcols(junctions)[["gene_id_end"]]) > 0 ~ "novel_acceptor",
-            TRUE ~ NA_character_
-        )
+  if (any(is.na(mcols(junctions)[["type"]]))) {
+    stop("There should be no junction categories left as NA after tidying...")
+  }
 
-    if (any(is.na(mcols(junctions)[["type"]]))) {
-        stop("There should be no junction categories left as NA after tidying...")
-    }
+  # split the novel_combo into novel_combo and novel_exon_skip
+  # do this separately to save time - case_when() evaluates each condition across all junctions
+  # since each column is called as mcols(junctions)[["col"]]
+  # the below only checks for novel_exon_skip in the novel_combo subset
+  # the two distinguished by whether the start/end of junction overlap a matching transcript
+  mcols(junctions)[["index_tmp"]] <- seq_along(junctions)
+  novel_combo <- junctions[mcols(junctions)[["type"]] == "novel_combo"]
+  novel_exon_skip_indexes <- mcols(novel_combo)[["index_tmp"]][any(mcols(novel_combo)[["tx_name_start"]] %in% mcols(novel_combo)[["tx_name_end"]])]
+  mcols(junctions)[["type"]][novel_exon_skip_indexes] <- "novel_exon_skip"
+  mcols(junctions)[["index_tmp"]] <- NULL
 
-    # split the novel_combo into novel_combo and novel_exon_skip
-    # do this separately to save time - case_when() evaluates each condition across all junctions
-    # since each column is called as mcols(junctions)[["col"]]
-    # the below only checks for novel_exon_skip in the novel_combo subset
-    # the two distinguished by whether the start/end of junction overlap a matching transcript
-    mcols(junctions)[["index_tmp"]] <- seq_along(junctions)
-    novel_combo <- junctions[mcols(junctions)[["type"]] == "novel_combo"]
-    novel_exon_skip_indexes <- mcols(novel_combo)[["index_tmp"]][any(mcols(novel_combo)[["tx_name_start"]] %in% mcols(novel_combo)[["tx_name_end"]])]
-    mcols(junctions)[["type"]][novel_exon_skip_indexes] <- "novel_exon_skip"
-    mcols(junctions)[["index_tmp"]] <- NULL
+  # set junction categories as factor with all possible levels
+  mcols(junctions)[["type"]] <- mcols(junctions)[["type"]] %>%
+    factor(levels = c(
+      "annotated",
+      "novel_acceptor",
+      "novel_donor",
+      "novel_exon_skip",
+      "novel_combo",
+      "ambig_gene",
+      "unannotated"
+    ))
 
-    # set junction categories as factor with all possible levels
-    mcols(junctions)[["type"]] <- mcols(junctions)[["type"]] %>%
-        factor(levels = c(
-            "annotated",
-            "novel_acceptor",
-            "novel_donor",
-            "novel_exon_skip",
-            "novel_combo",
-            "ambig_gene",
-            "unannotated"
-        ))
-
-    return(junctions)
+  return(junctions)
 }
