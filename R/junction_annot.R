@@ -37,11 +37,11 @@ junction_annot <- function(junctions,
     unlist()
 
   ##### G: Detect number of cores
-  if (!exists("num_cores")) num_cores <<- 1
+  if (!exists("dasper_cores")) dasper_cores <<- 1
 
   ##### G: Based on the number of cores, run default junction annotation
   ##### pipeline or my modified version
-  if (num_cores == 1) {
+  if (dasper_cores == 1) {
     ##### Obtain annotation through overlapping introns/exons #####
     print(stringr::str_c(Sys.time(), " - Getting junction annotation using overlapping exons..."))
     junctions <- .junction_annot_ref(junctions, ref_introns, ref_exons)
@@ -58,14 +58,14 @@ junction_annot <- function(junctions,
   } else {
     ##### Split the junctions into a list
     mcols(junctions)[["junction_order"]] <- seq_along(junctions)
-    mcols(junctions)[["group_idx"]] <- mcols(junctions)[["junction_order"]] %% num_cores
+    mcols(junctions)[["group_idx"]] <- mcols(junctions)[["junction_order"]] %% dasper_cores
 
     split_junctions <- split(junctions, mcols(junctions)[["group_idx"]])
 
     ##### Parallel annotation of the results
     annot_split_junctions <- BiocParallel::bplapply(
       split_junctions,
-      BPPARAM = BiocParallel::SnowParam(workers = num_cores, type = "FORK"),
+      BPPARAM = BiocParallel::SnowParam(workers = dasper_cores, type = "FORK"),
       function(split_junctions_i) {
         split_junctions_i <- .junction_annot_ref(split_junctions_i, ref_introns, ref_exons)
         split_junctions_i <- .junction_annot_tidy(split_junctions_i, ref_cols_to_merge)
